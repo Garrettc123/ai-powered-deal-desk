@@ -7,49 +7,91 @@ import json
 import os
 import logging
 from datetime import datetime, timezone
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field
-from openai import OpenAI
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field, field_validator
+from openai import OpenAI, OpenAIError
 
-logging.basicConfig(level=logging.INFO)
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
 # OpenAI v1 client
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY", ""))
+# ---------------------------------------------------------------------------
+_api_key = os.getenv("OPENAI_API_KEY", "")
+if not _api_key:
+    logger.warning("OPENAI_API_KEY is not set; AI generation will use fallback responses.")
+client = OpenAI(api_key=_api_key)
 
-# Allowed origins - restrict via env var in production
-ALLOWED_ORIGINS = os.getenv(
+# ---------------------------------------------------------------------------
+# CORS
+# ---------------------------------------------------------------------------
+ALLOWED_ORIGINS: List[str] = os.getenv(
     "ALLOWED_ORIGINS", "http://localhost:3000,http://localhost:8080"
 ).split(",")
 
+# ---------------------------------------------------------------------------
+# App
+# ---------------------------------------------------------------------------
 app = FastAPI(
     title="AI-Powered Deal Desk",
     description="Auto-generate winning sales proposals in 60 seconds",
     version="1.0.0",
+    docs_url="/docs",
+    redoc_url="/redoc",
 )
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
-    allow_credentials=False,  # FIX: wildcard+credentials is a security vulnerability
+    allow_credentials=False,
     allow_methods=["GET", "POST"],
     allow_headers=["Content-Type", "Authorization"],
 )
 
 
-# Models
+# ---------------------------------------------------------------------------
+# Global exception handler
+# ---------------------------------------------------------------------------
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    logger.error(f"Unhandled exception on {request.url}: {exc}", exc_info=True)
+    return JSONResponse(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        content={"detail": "An internal server error occurred."},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Pydantic models
+# ---------------------------------------------------------------------------
+UrgencyLevel = Literal["low", "medium", "high"]
+
+
 class ProposalRequest(BaseModel):
-    company_name: str = Field(..., min_length=2)
-    industry: Optional[str] = None
+    company_name: str = Field(..., min_length=2, max_length=200)
+    industry: Optional[str] = Field(default=None, max_length=100)
     pain_points: List[str] = Field(default=[])
-    budget_range: Optional[str] = None
+    budget_range: Optional[str] = Field(default=None, max_length=100)
     decision_makers: List[str] = Field(default=[])
     competitors: List[str] = Field(default=[])
-    urgency: str = Field(default="medium")
+    urgency: UrgencyLevel = Field(default="medium")
+
+    @field_validator("pain_points", "decision_makers", "competitors")
+    @classmethod
+    def limit_list_length(cls, v: List[str]) -> List[str]:
+        if len(v) > 20:
+            raise ValueError("List must not exceed 20 items.")
+        return v
 
 
 class PricingTier(BaseModel):
@@ -64,89 +106,110 @@ class ProposalResponse(BaseModel):
     executive_summary: str
     solution_overview: str
     pricing_tiers: List[PricingTier]
-    roi_calculation: Dict
+    roi_calculation: Dict[str, Any]
     next_steps: str
     pdf_url: str
+    generated_at: str
 
 
-async def generate_proposal_content(request: ProposalRequest) -> Dict:
+class HealthResponse(BaseModel):
+    status: str
+    timestamp: str
+    openai_configured: bool
+    version: str
+
+
+# ---------------------------------------------------------------------------
+# Business logic
+# ---------------------------------------------------------------------------
+async def generate_proposal_content(request: ProposalRequest) -> Dict[str, Any]:
     """
-    Generate proposal using GPT-4 (OpenAI v1 client)
+    Generate proposal using GPT-4 (OpenAI v1 client).
+    Falls back to static content if the API call fails.
     """
-    logger.info(f"Generating proposal for: {request.company_name}")
+    logger.info(f"Generating AI proposal for: {request.company_name}")
 
-    system_prompt = """
-You are an expert B2B sales proposal writer with 15 years of experience.
-Create compelling, customized sales proposals that win deals.
-Focus on:
-1. Understanding their specific pain points
-2. Clear ROI and value proposition
-3. Social proof and credibility
-4. Competitive differentiation
-5. Clear next steps
-Return structured JSON with sections.
-"""
+    system_prompt = (
+        "You are an expert B2B sales proposal writer with 15 years of experience. "
+        "Create compelling, customized sales proposals that win deals. "
+        "Focus on: pain-point alignment, clear ROI and value proposition, "
+        "competitive differentiation, and concrete next steps. "
+        "Always return valid JSON."
+    )
+
+    pain_points_str = ", ".join(request.pain_points) or "General efficiency improvements"
+    competitors_str = ", ".join(request.competitors) or "Generic alternatives"
+
     user_prompt = f"""
 Create a sales proposal for:
 Company: {request.company_name}
 Industry: {request.industry or 'Unknown'}
-Pain Points: {', '.join(request.pain_points) or 'General efficiency improvements'}
+Pain Points: {pain_points_str}
 Budget: {request.budget_range or 'Not specified'}
-Competing with: {', '.join(request.competitors) or 'Generic alternatives'}
+Competing with: {competitors_str}
 Urgency: {request.urgency}
-Generate:
-1. Executive Summary (3 paragraphs)
-2. Solution Overview (5 paragraphs)
-3. ROI Calculation (show $500K+ annual savings)
-4. Next Steps (3 bullet points)
-Tone: Professional, consultative, ROI-focused
+
+Return a JSON object with these keys:
+- executive_summary (string, 3 paragraphs)
+- solution_overview (string, 5 paragraphs)
+- roi_calculation (object with annual_savings and payback_period_months)
+- next_steps (string, 3 bullet points)
+
+Tone: Professional, consultative, ROI-focused.
 """
+
     try:
         response = client.chat.completions.create(
-            model="gpt-4-turbo-preview",
+            model=os.getenv("OPENAI_MODEL", "gpt-4-turbo-preview"),
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
             temperature=0.7,
             response_format={"type": "json_object"},
+            timeout=60,
         )
-        content = response.choices[0].message.content or "{}"
-        return json.loads(content)
-    except Exception as e:
-        logger.error(f"GPT-4 generation failed: {e}")
-        # Return fallback data
-        return {
-            "executive_summary": (
-                f"{request.company_name} faces significant challenges with "
-                f"{', '.join(request.pain_points[:2]) or 'operational efficiency'}. "
-                "Our solution delivers measurable ROI through automation and intelligence."
-            ),
-            "solution_overview": "Our platform provides enterprise-grade capabilities tailored to your specific needs...",
-            "roi_calculation": {
-                "annual_savings": 500000,
-                "payback_period_months": 3,
-            },
-            "next_steps": "Schedule technical deep-dive call within 3 business days",
-        }
+        raw = response.choices[0].message.content or "{}"
+        return json.loads(raw)
+    except OpenAIError as exc:
+        logger.error(f"OpenAI API error for {request.company_name}: {exc}")
+    except json.JSONDecodeError as exc:
+        logger.error(f"Failed to parse OpenAI JSON response: {exc}")
+    except Exception as exc:
+        logger.error(f"Unexpected error during proposal generation: {exc}")
+
+    # Fallback
+    return {
+        "executive_summary": (
+            f"{request.company_name} faces significant challenges with "
+            f"{pain_points_str}. "
+            "Our solution delivers measurable ROI through automation and intelligence."
+        ),
+        "solution_overview": (
+            "Our platform provides enterprise-grade capabilities tailored to your "
+            "specific needs, streamlining operations and accelerating revenue growth."
+        ),
+        "roi_calculation": {
+            "annual_savings": 500000,
+            "payback_period_months": 3,
+        },
+        "next_steps": "Schedule a technical deep-dive call within 3 business days.",
+    }
 
 
 def generate_pricing_tiers(request: ProposalRequest) -> List[PricingTier]:
     """
-    Generate dynamic pricing based on company profile
+    Generate dynamic pricing tiers based on company profile and urgency.
     """
-    base_price = 10000
+    base_price = int(os.getenv("BASE_PRICE", "10000"))
 
-    # Adjust for urgency
-    if request.urgency == "high":
-        base_price = int(base_price * 1.2)
-    elif request.urgency == "low":
-        base_price = int(base_price * 0.8)
+    multipliers: Dict[str, float] = {"high": 1.2, "medium": 1.0, "low": 0.8}
+    base_price = int(base_price * multipliers.get(request.urgency, 1.0))
 
     return [
         PricingTier(
             name="Starter",
-            price=base_price * 0.5,
+            price=round(base_price * 0.5, 2),
             features=[
                 "Core platform access",
                 "Email support",
@@ -170,7 +233,7 @@ def generate_pricing_tiers(request: ProposalRequest) -> List[PricingTier]:
         ),
         PricingTier(
             name="Enterprise",
-            price=base_price * 2.0,
+            price=round(base_price * 2.0, 2),
             features=[
                 "Everything in Professional",
                 "Unlimited users",
@@ -184,11 +247,15 @@ def generate_pricing_tiers(request: ProposalRequest) -> List[PricingTier]:
     ]
 
 
-@app.get("/")
-async def root():
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
+@app.get("/", summary="Service info")
+async def root() -> Dict[str, Any]:
     return {
         "service": "AI-Powered Deal Desk",
         "version": "1.0.0",
+        "docs": "/docs",
         "revenue_target": "$18K/month",
         "win_rate": "42%",
         "generation_time": "60 seconds",
@@ -200,30 +267,32 @@ async def root():
     }
 
 
-@app.get("/health")
-async def health_check():
-    return {
-        "status": "healthy",
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "openai_configured": bool(os.getenv("OPENAI_API_KEY", "")),
-    }
+@app.get("/health", response_model=HealthResponse, summary="Health check")
+async def health_check() -> HealthResponse:
+    return HealthResponse(
+        status="healthy",
+        timestamp=datetime.now(timezone.utc).isoformat(),
+        openai_configured=bool(os.getenv("OPENAI_API_KEY", "")),
+        version="1.0.0",
+    )
 
 
-@app.post("/api/v1/proposals", response_model=ProposalResponse)
-async def create_proposal(request: ProposalRequest):
+@app.post(
+    "/api/v1/proposals",
+    response_model=ProposalResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Generate a sales proposal",
+)
+async def create_proposal(request: ProposalRequest) -> ProposalResponse:
     """
-    Generate complete sales proposal
+    Generate a complete AI-powered sales proposal for a prospect company.
     """
-    logger.info(f"Creating proposal for {request.company_name}")
+    logger.info(f"Creating proposal for '{request.company_name}'")
 
-    # Generate content with AI
     content = await generate_proposal_content(request)
-
-    # Generate pricing
     pricing_tiers = generate_pricing_tiers(request)
-
-    # Create proposal ID using timezone-aware datetime
-    proposal_id = f"PROP-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}"
+    now = datetime.now(timezone.utc)
+    proposal_id = f"PROP-{now.strftime('%Y%m%d-%H%M%S')}"
 
     return ProposalResponse(
         proposal_id=proposal_id,
@@ -233,21 +302,31 @@ async def create_proposal(request: ProposalRequest):
         roi_calculation=content.get("roi_calculation", {}),
         next_steps=content.get("next_steps", ""),
         pdf_url=f"/proposals/{proposal_id}.pdf",
+        generated_at=now.isoformat(),
     )
 
 
-@app.get("/api/v1/stats")
-async def get_stats():
+@app.get("/api/v1/stats", summary="Platform statistics")
+async def get_stats() -> Dict[str, Any]:
+    """
+    Returns platform-level statistics.
+    In production, these should be sourced from a real database.
+    """
     return {
-        "proposals_generated_today": 247,
-        "average_win_rate": "42%",
-        "average_generation_time": "58 seconds",
-        "revenue_impact": "$12.3M pipeline created",
+        "proposals_generated_today": int(os.getenv("STAT_PROPOSALS_TODAY", "0")),
+        "average_win_rate": os.getenv("STAT_WIN_RATE", "42%"),
+        "average_generation_time": os.getenv("STAT_GEN_TIME", "58 seconds"),
+        "revenue_impact": os.getenv("STAT_REVENUE_IMPACT", "$0 pipeline created"),
     }
 
 
+# ---------------------------------------------------------------------------
+# Entrypoint
+# ---------------------------------------------------------------------------
 if __name__ == "__main__":
     import uvicorn
 
-    port = int(os.getenv("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    port = int(os.getenv("PORT", "8000"))
+    host = os.getenv("HOST", "0.0.0.0")
+    reload = os.getenv("RELOAD", "false").lower() == "true"
+    uvicorn.run("server:app", host=host, port=port, reload=reload)
