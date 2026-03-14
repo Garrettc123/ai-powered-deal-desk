@@ -1,0 +1,34 @@
+version: "3.9"
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ai-powered-deal-desk:latest
+    container_name: ai_deal_desk
+    ports:
+      - "${PORT:-8000}:8000"
+    environment:
+      - PORT=8000
+      - HOST=0.0.0.0
+      - RELOAD=false
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4-turbo-preview}
+      - STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY:-}
+      - STRIPE_PUBLISHABLE_KEY=${STRIPE_PUBLISHABLE_KEY:-}
+      - STRIPE_WEBHOOK_SECRET=${STRIPE_WEBHOOK_SECRET:-}
+      - STRIPE_PRICE_BASIC=${STRIPE_PRICE_BASIC:-}
+      - STRIPE_PRICE_PRO=${STRIPE_PRICE_PRO:-}
+      - STRIPE_PRICE_ENTERPRISE=${STRIPE_PRICE_ENTERPRISE:-}
+      - CHECKOUT_SUCCESS_URL=${CHECKOUT_SUCCESS_URL:-http://localhost:8000/dashboard?success=1}
+      - CHECKOUT_CANCEL_URL=${CHECKOUT_CANCEL_URL:-http://localhost:8000/dashboard?cancelled=1}
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost:3000,http://localhost:8080}
+      - BASE_PRICE=${BASE_PRICE:-10000}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      start_period: 15s
+      retries: 3
