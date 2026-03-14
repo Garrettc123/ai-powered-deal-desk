@@ -6,10 +6,16 @@ on:
   pull_request:
     branches: [main]
 
+# Restrict default token permissions across all jobs
+permissions:
+  contents: read
+
 jobs:
   test:
     name: Lint & Test (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -46,6 +52,8 @@ jobs:
     name: Docker build
     runs-on: ubuntu-latest
     needs: test
+    permissions:
+      contents: read
 
     steps:
       - name: Checkout code
@@ -67,6 +75,8 @@ jobs:
     name: Deploy to Railway
     runs-on: ubuntu-latest
     needs: [test, docker]
+    permissions:
+      contents: read
     # Only deploy on pushes to main (not PRs)
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
 
