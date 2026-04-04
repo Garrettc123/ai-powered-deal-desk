@@ -1,0 +1,399 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI Deal Desk — Revenue Dashboard</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    .card { @apply bg-white rounded-xl shadow-md p-6; }
+    .badge-basic    { background:#dbeafe; color:#1e40af; }
+    .badge-pro      { background:#ede9fe; color:#5b21b6; }
+    .badge-enterprise { background:#fef3c7; color:#92400e; }
+    .spinner { border-top-color: #6366f1; }
+  </style>
+</head>
+<body class="bg-gray-50 min-h-screen font-sans text-gray-800">
+
+<!-- ── Header ───────────────────────────────────────────── -->
+<header class="bg-indigo-700 text-white py-5 px-8 flex items-center justify-between shadow-lg">
+  <div>
+    <h1 class="text-2xl font-bold tracking-tight">⚡ AI Deal Desk</h1>
+    <p class="text-indigo-200 text-sm mt-0.5">Revenue target: <strong>$18K / month</strong></p>
+  </div>
+  <nav class="flex gap-4 text-sm">
+    <a href="/docs" target="_blank" class="bg-white/20 hover:bg-white/30 rounded-lg px-4 py-2 transition">API Docs</a>
+    <a href="#pricing" class="bg-indigo-500 hover:bg-indigo-400 rounded-lg px-4 py-2 transition">Get Started</a>
+  </nav>
+</header>
+
+<!-- ── Success / Cancel banners ──────────────────────────── -->
+<div id="banner-success" class="hidden bg-green-50 border border-green-200 text-green-800 text-center py-3 px-6 text-sm font-medium">
+  🎉 Payment successful! Your subscription is now active.
+</div>
+<div id="banner-cancel" class="hidden bg-yellow-50 border border-yellow-200 text-yellow-800 text-center py-3 px-6 text-sm font-medium">
+  Checkout cancelled. Your proposal is still saved — upgrade whenever you're ready.
+</div>
+
+<main class="max-w-6xl mx-auto px-6 py-10 space-y-10">
+
+  <!-- ── Revenue KPIs ──────────────────────────────────────── -->
+  <section>
+    <h2 class="text-lg font-semibold mb-4 text-gray-600 uppercase tracking-wide">Live Revenue</h2>
+    <div id="kpi-grid" class="grid grid-cols-2 md:grid-cols-4 gap-4">
+      <div class="card text-center animate-pulse" id="kpi-mrr">
+        <div class="text-3xl font-bold text-indigo-600">—</div>
+        <div class="text-xs text-gray-500 mt-1">Monthly Recurring Revenue</div>
+      </div>
+      <div class="card text-center animate-pulse" id="kpi-subs">
+        <div class="text-3xl font-bold text-emerald-600">—</div>
+        <div class="text-xs text-gray-500 mt-1">Active Subscriptions</div>
+      </div>
+      <div class="card text-center animate-pulse" id="kpi-target">
+        <div class="text-3xl font-bold text-violet-600">—</div>
+        <div class="text-xs text-gray-500 mt-1">Target Progress</div>
+      </div>
+      <div class="card text-center animate-pulse" id="kpi-win">
+        <div class="text-3xl font-bold text-amber-500">—</div>
+        <div class="text-xs text-gray-500 mt-1">Win Rate</div>
+      </div>
+    </div>
+
+    <!-- Progress bar -->
+    <div class="mt-4">
+      <div class="flex justify-between text-xs text-gray-500 mb-1">
+        <span>MRR vs $18K target</span>
+        <span id="progress-label">Loading…</span>
+      </div>
+      <div class="w-full bg-gray-200 rounded-full h-3">
+        <div id="progress-bar" class="bg-indigo-600 h-3 rounded-full transition-all duration-700" style="width:0%"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Plan breakdown ────────────────────────────────────── -->
+  <section>
+    <h2 class="text-lg font-semibold mb-4 text-gray-600 uppercase tracking-wide">Subscription Breakdown</h2>
+    <div id="plan-grid" class="grid grid-cols-1 md:grid-cols-3 gap-4">
+      <!-- Populated by JS -->
+      <div class="card animate-pulse h-24"></div>
+      <div class="card animate-pulse h-24"></div>
+      <div class="card animate-pulse h-24"></div>
+    </div>
+  </section>
+
+  <!-- ── Pricing plans ─────────────────────────────────────── -->
+  <section id="pricing">
+    <h2 class="text-lg font-semibold mb-4 text-gray-600 uppercase tracking-wide">Subscription Plans</h2>
+    <div id="plans-grid" class="grid grid-cols-1 md:grid-cols-3 gap-6">
+      <!-- Populated by JS -->
+    </div>
+  </section>
+
+  <!-- ── Lead Capture Form ──────────────────────────────────── -->
+  <section id="lead-form-section">
+    <h2 class="text-lg font-semibold mb-4 text-gray-600 uppercase tracking-wide">Get Your AI Proposal</h2>
+    <div class="card max-w-2xl">
+      <p class="text-gray-500 mb-6 text-sm">Fill in your details and we'll generate a custom sales proposal <em>and</em> set up your subscription in under 60 seconds.</p>
+      <form id="lead-form" class="space-y-4">
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div>
+            <label class="block text-sm font-medium mb-1">Company Name *</label>
+            <input name="company_name" required minlength="2" maxlength="200"
+              class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400"
+              placeholder="Acme Corporation" />
+          </div>
+          <div>
+            <label class="block text-sm font-medium mb-1">Your Name *</label>
+            <input name="contact_name" required minlength="2" maxlength="200"
+              class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400"
+              placeholder="Jane Smith" />
+          </div>
+          <div>
+            <label class="block text-sm font-medium mb-1">Work Email *</label>
+            <input name="contact_email" type="email" required maxlength="200"
+              class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400"
+              placeholder="jane@acme.com" />
+          </div>
+          <div>
+            <label class="block text-sm font-medium mb-1">Industry</label>
+            <input name="industry" maxlength="100"
+              class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400"
+              placeholder="Manufacturing, SaaS, Finance…" />
+          </div>
+          <div>
+            <label class="block text-sm font-medium mb-1">Budget Range</label>
+            <input name="budget_range" maxlength="100"
+              class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400"
+              placeholder="$50K–$200K" />
+          </div>
+          <div>
+            <label class="block text-sm font-medium mb-1">Urgency</label>
+            <select name="urgency"
+              class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400">
+              <option value="medium">Medium</option>
+              <option value="high">High — closing this quarter</option>
+              <option value="low">Low — exploring options</option>
+            </select>
+          </div>
+        </div>
+        <div>
+          <label class="block text-sm font-medium mb-1">Key Pain Points (comma-separated)</label>
+          <textarea name="pain_points" rows="2" maxlength="2000"
+            class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400"
+            placeholder="manual invoicing, slow reporting, high churn"></textarea>
+        </div>
+        <div>
+          <label class="block text-sm font-medium mb-1">Plan *</label>
+          <div class="flex gap-3">
+            <label class="flex-1 border-2 border-gray-200 rounded-lg p-3 cursor-pointer hover:border-indigo-400 transition has-[:checked]:border-indigo-600 has-[:checked]:bg-indigo-50">
+              <input type="radio" name="plan" value="basic" class="sr-only" />
+              <div class="font-semibold text-sm">Basic</div>
+              <div class="text-gray-500 text-xs">$99/mo</div>
+            </label>
+            <label class="flex-1 border-2 border-indigo-600 bg-indigo-50 rounded-lg p-3 cursor-pointer hover:border-indigo-700 transition has-[:checked]:border-indigo-700">
+              <input type="radio" name="plan" value="pro" checked class="sr-only" />
+              <div class="font-semibold text-sm">Pro <span class="text-indigo-600 text-xs ml-1">★ Popular</span></div>
+              <div class="text-gray-500 text-xs">$299/mo</div>
+            </label>
+            <label class="flex-1 border-2 border-gray-200 rounded-lg p-3 cursor-pointer hover:border-amber-400 transition has-[:checked]:border-amber-600 has-[:checked]:bg-amber-50">
+              <input type="radio" name="plan" value="enterprise" class="sr-only" />
+              <div class="font-semibold text-sm">Enterprise</div>
+              <div class="text-gray-500 text-xs">$999/mo</div>
+            </label>
+          </div>
+        </div>
+
+        <div id="form-error" class="hidden text-red-600 text-sm bg-red-50 border border-red-200 rounded-lg px-4 py-3"></div>
+
+        <button type="submit" id="submit-btn"
+          class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-3 rounded-lg text-sm transition flex items-center justify-center gap-2">
+          <span id="btn-text">Generate My Proposal →</span>
+          <svg id="btn-spinner" class="hidden animate-spin h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+          </svg>
+        </button>
+      </form>
+
+      <!-- Proposal result -->
+      <div id="proposal-result" class="hidden mt-8 border-t pt-6 space-y-4">
+        <h3 class="font-bold text-lg text-gray-800">Your Proposal is Ready 🎉</h3>
+        <div id="proposal-summary" class="text-sm text-gray-600 leading-relaxed"></div>
+        <div id="proposal-roi" class="bg-emerald-50 border border-emerald-200 rounded-lg p-4 text-sm"></div>
+        <div id="proposal-nextsteps" class="text-sm text-gray-600"></div>
+        <a id="checkout-link" href="#" target="_blank"
+          class="hidden mt-4 inline-block bg-emerald-600 hover:bg-emerald-700 text-white font-semibold py-3 px-6 rounded-lg text-sm transition">
+          Complete Payment &amp; Activate Subscription →
+        </a>
+        <p id="checkout-manual" class="hidden text-sm text-gray-500 italic">
+          Billing will be set up manually — our team will contact you shortly.
+        </p>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<footer class="text-center text-xs text-gray-400 py-8">
+  AI-Powered Deal Desk · Revenue target $18K/month · <a href="/docs" class="underline">API Docs</a>
+</footer>
+
+<script>
+const BASE = '';
+
+// ── Banners ────────────────────────────────────────────────
+const params = new URLSearchParams(location.search);
+if (params.get('success') === '1') document.getElementById('banner-success').classList.remove('hidden');
+if (params.get('cancelled') === '1') document.getElementById('banner-cancel').classList.remove('hidden');
+
+// ── Revenue KPIs ──────────────────────────────────────────
+async function loadRevenue() {
+  try {
+    const r = await fetch(`${BASE}/api/v1/revenue`);
+    const d = await r.json();
+
+    setKpi('kpi-mrr', `$${fmt(d.mrr)}`, 'Monthly Recurring Revenue');
+    setKpi('kpi-subs', d.active_subscriptions, 'Active Subscriptions');
+    setKpi('kpi-target', `${d.target_progress_pct}%`, 'Target Progress');
+
+    const bar = document.getElementById('progress-bar');
+    const pct = Math.min(d.target_progress_pct, 100);
+    bar.style.width = `${pct}%`;
+    document.getElementById('progress-label').textContent =
+      `$${fmt(d.mrr)} / $${fmt(d.revenue_target)}`;
+
+    // plan breakdown
+    const grid = document.getElementById('plan-grid');
+    grid.innerHTML = '';
+    const colours = {basic:'badge-basic', pro:'badge-pro', enterprise:'badge-enterprise'};
+    for (const [key, plan] of Object.entries(d.plans)) {
+      grid.innerHTML += `
+        <div class="card flex items-center gap-4">
+          <div class="text-3xl font-bold ${planColour(key)}">${plan.active}</div>
+          <div>
+            <div class="font-semibold">${plan.name}</div>
+            <span class="text-xs px-2 py-0.5 rounded-full font-medium ${colours[key] || ''}">\$${plan.price_monthly}/mo</span>
+          </div>
+        </div>`;
+    }
+  } catch(e) {
+    console.warn('Revenue fetch error:', e);
+  }
+}
+
+// ── Stats (win rate, etc.) ─────────────────────────────────
+async function loadStats() {
+  try {
+    const r = await fetch(`${BASE}/api/v1/stats`);
+    const d = await r.json();
+    setKpi('kpi-win', d.average_win_rate, 'Win Rate');
+  } catch(e) {}
+}
+
+// ── Subscription plans ─────────────────────────────────────
+async function loadPlans() {
+  try {
+    const r = await fetch(`${BASE}/api/v1/plans`);
+    const d = await r.json();
+    const grid = document.getElementById('plans-grid');
+    grid.innerHTML = '';
+    const highlight = {basic:'', pro:'ring-2 ring-indigo-500', enterprise:''};
+    for (const [key, plan] of Object.entries(d)) {
+      const featuresHtml = plan.features.map(f => `<li class="flex gap-2 items-start"><span class="text-emerald-500 mt-0.5">✓</span>${f}</li>`).join('');
+      grid.innerHTML += `
+        <div class="card ${highlight[key] || ''} flex flex-col">
+          ${key === 'pro' ? '<div class="text-xs font-bold text-indigo-600 mb-2">★ MOST POPULAR</div>' : ''}
+          <div class="font-bold text-xl mb-1">${plan.name}</div>
+          <div class="text-3xl font-extrabold text-gray-900 mb-4">$${plan.price_monthly}<span class="text-base font-normal text-gray-400">/mo</span></div>
+          <ul class="space-y-1.5 text-sm text-gray-600 flex-1 mb-6">${featuresHtml}</ul>
+          <button onclick="startCheckout('${key}')"
+            class="w-full py-2.5 rounded-lg font-semibold text-sm transition ${key === 'pro' ? 'bg-indigo-600 hover:bg-indigo-700 text-white' : 'bg-gray-100 hover:bg-gray-200 text-gray-800'}">
+            Get ${plan.name}
+          </button>
+        </div>`;
+    }
+  } catch(e) {
+    console.warn('Plans fetch error:', e);
+  }
+}
+
+function startCheckout(plan) {
+  // Pre-fill the form plan and scroll to it
+  document.querySelector(`input[name="plan"][value="${plan}"]`).checked = true;
+  document.getElementById('lead-form-section').scrollIntoView({behavior:'smooth'});
+}
+
+// ── Lead form ─────────────────────────────────────────────
+document.getElementById('lead-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const btn = document.getElementById('submit-btn');
+  const btnText = document.getElementById('btn-text');
+  const spinner = document.getElementById('btn-spinner');
+  const errBox = document.getElementById('form-error');
+
+  btn.disabled = true;
+  btnText.textContent = 'Generating…';
+  spinner.classList.remove('hidden');
+  errBox.classList.add('hidden');
+
+  const fd = new FormData(e.target);
+  const painRaw = fd.get('pain_points') || '';
+  const painList = painRaw.split(',').map(s => s.trim()).filter(Boolean).slice(0, 20);
+
+  const payload = {
+    company_name: fd.get('company_name'),
+    contact_name: fd.get('contact_name'),
+    contact_email: fd.get('contact_email'),
+    plan: fd.get('plan') || 'pro',
+    industry: fd.get('industry') || null,
+    pain_points: painList,
+    budget_range: fd.get('budget_range') || null,
+    urgency: fd.get('urgency') || 'medium',
+    success_url: `${location.origin}/dashboard?success=1`,
+    cancel_url: `${location.origin}/dashboard?cancelled=1`,
+  };
+
+  try {
+    const resp = await fetch(`${BASE}/api/v1/leads`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload),
+    });
+
+    const data = await resp.json();
+
+    if (!resp.ok) {
+      throw new Error(data.detail || `Error ${resp.status}`);
+    }
+
+    // Show proposal result
+    const result = document.getElementById('proposal-result');
+    const summary = document.getElementById('proposal-summary');
+    const roi = document.getElementById('proposal-roi');
+    const nextsteps = document.getElementById('proposal-nextsteps');
+    const checkoutLink = document.getElementById('checkout-link');
+    const checkoutManual = document.getElementById('checkout-manual');
+
+    summary.textContent = data.proposal.executive_summary;
+    const roiData = data.proposal.roi_calculation || {};
+    roi.innerHTML = `<strong>Projected ROI:</strong> $${fmt(roiData.annual_savings || 0)} annual savings · ${roiData.payback_period_months || '–'} month payback period`;
+    nextsteps.innerHTML = `<strong>Next Steps:</strong><br>${(data.proposal.next_steps || '').replace(/\n/g, '<br>')}`;
+
+    if (data.checkout_url) {
+      checkoutLink.href = data.checkout_url;
+      checkoutLink.classList.remove('hidden');
+      checkoutManual.classList.add('hidden');
+    } else {
+      checkoutLink.classList.add('hidden');
+      checkoutManual.classList.remove('hidden');
+    }
+
+    result.classList.remove('hidden');
+    result.scrollIntoView({behavior:'smooth'});
+
+    // Refresh revenue after a short delay
+    setTimeout(loadRevenue, 3000);
+
+  } catch(err) {
+    errBox.textContent = err.message || 'Something went wrong. Please try again.';
+    errBox.classList.remove('hidden');
+  } finally {
+    btn.disabled = false;
+    btnText.textContent = 'Generate My Proposal →';
+    spinner.classList.add('hidden');
+  }
+});
+
+// ── Helpers ───────────────────────────────────────────────
+function fmt(n) {
+  return Number(n).toLocaleString('en-US', {maximumFractionDigits: 0});
+}
+
+function setKpi(id, value, label) {
+  const el = document.getElementById(id);
+  el.classList.remove('animate-pulse');
+  el.innerHTML = `<div class="text-3xl font-bold ${kpiColour(id)}">${value}</div><div class="text-xs text-gray-500 mt-1">${label}</div>`;
+}
+
+function kpiColour(id) {
+  if (id === 'kpi-mrr') return 'text-indigo-600';
+  if (id === 'kpi-subs') return 'text-emerald-600';
+  if (id === 'kpi-target') return 'text-violet-600';
+  return 'text-amber-500';
+}
+
+function planColour(key) {
+  if (key === 'basic') return 'text-blue-600';
+  if (key === 'pro') return 'text-violet-600';
+  return 'text-amber-600';
+}
+
+// ── Init ──────────────────────────────────────────────────
+loadRevenue();
+loadStats();
+loadPlans();
+setInterval(loadRevenue, 30000); // refresh every 30s
+</script>
+</body>
+</html>

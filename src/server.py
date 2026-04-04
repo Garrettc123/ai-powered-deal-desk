@@ -9,10 +9,12 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Literal, Optional
 
+import stripe
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field, field_validator
+from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, EmailStr, Field, field_validator
 from openai import OpenAI, OpenAIError
 
 # ---------------------------------------------------------------------------
@@ -33,6 +35,67 @@ if not _api_key:
 client = OpenAI(api_key=_api_key)
 
 # ---------------------------------------------------------------------------
+# Stripe configuration
+# ---------------------------------------------------------------------------
+STRIPE_SECRET_KEY: str = os.getenv("STRIPE_SECRET_KEY", "")
+STRIPE_WEBHOOK_SECRET: str = os.getenv("STRIPE_WEBHOOK_SECRET", "")
+STRIPE_PUBLISHABLE_KEY: str = os.getenv("STRIPE_PUBLISHABLE_KEY", "")
+
+if STRIPE_SECRET_KEY:
+    stripe.api_key = STRIPE_SECRET_KEY
+else:
+    logger.warning("STRIPE_SECRET_KEY is not set; billing endpoints will return errors.")
+
+# Default checkout redirect URLs
+_DEFAULT_SUCCESS_URL = os.getenv(
+    "CHECKOUT_SUCCESS_URL", "http://localhost:8000/dashboard?success=1"
+)
+_DEFAULT_CANCEL_URL = os.getenv(
+    "CHECKOUT_CANCEL_URL", "http://localhost:8000/dashboard?cancelled=1"
+)
+
+# Stripe Price IDs (create these in your Stripe dashboard and set as env vars)
+SUBSCRIPTION_PLANS: Dict[str, Dict[str, Any]] = {
+    "basic": {
+        "name": "Basic",
+        "price_monthly": 99,
+        "price_id": os.getenv("STRIPE_PRICE_BASIC", ""),
+        "features": [
+            "Up to 10 proposals/month",
+            "Standard templates",
+            "Email support",
+            "Basic analytics",
+        ],
+    },
+    "pro": {
+        "name": "Pro",
+        "price_monthly": 299,
+        "price_id": os.getenv("STRIPE_PRICE_PRO", ""),
+        "features": [
+            "Unlimited proposals",
+            "AI-powered optimization",
+            "Priority support",
+            "Advanced analytics",
+            "CRM integration",
+            "Custom branding",
+        ],
+    },
+    "enterprise": {
+        "name": "Enterprise",
+        "price_monthly": 999,
+        "price_id": os.getenv("STRIPE_PRICE_ENTERPRISE", ""),
+        "features": [
+            "Everything in Pro",
+            "Dedicated account manager",
+            "Custom integrations",
+            "SLA guarantee",
+            "White-label option",
+            "Unlimited users",
+        ],
+    },
+}
+
+# ---------------------------------------------------------------------------
 # CORS
 # ---------------------------------------------------------------------------
 ALLOWED_ORIGINS: List[str] = os.getenv(
@@ -44,7 +107,10 @@ ALLOWED_ORIGINS: List[str] = os.getenv(
 # ---------------------------------------------------------------------------
 app = FastAPI(
     title="AI-Powered Deal Desk",
-    description="Auto-generate winning sales proposals in 60 seconds",
+    description=(
+        "Auto-generate winning sales proposals in 60 seconds. "
+        "Subscription plans: Basic $99/mo, Pro $299/mo, Enterprise $999/mo."
+    ),
     version="1.0.0",
     docs_url="/docs",
     redoc_url="/redoc",
@@ -55,8 +121,13 @@ app.add_middleware(
     allow_origins=ALLOWED_ORIGINS,
     allow_credentials=False,
     allow_methods=["GET", "POST"],
-    allow_headers=["Content-Type", "Authorization"],
+    allow_headers=["Content-Type", "Authorization", "stripe-signature"],
 )
+
+# Serve static files (dashboard) if the directory exists
+_static_dir = os.path.join(os.path.dirname(__file__), "static")
+if os.path.isdir(_static_dir):
+    app.mount("/static", StaticFiles(directory=_static_dir), name="static")
 
 
 # ---------------------------------------------------------------------------
@@ -75,6 +146,7 @@ async def global_exception_handler(request: Request, exc: Exception) -> JSONResp
 # Pydantic models
 # ---------------------------------------------------------------------------
 UrgencyLevel = Literal["low", "medium", "high"]
+PlanName = Literal["basic", "pro", "enterprise"]
 
 
 class ProposalRequest(BaseModel):
@@ -92,6 +164,37 @@ class ProposalRequest(BaseModel):
         if len(v) > 20:
             raise ValueError("List must not exceed 20 items.")
         return v
+
+
+class LeadRequest(BaseModel):
+    """Lead capture: creates a proposal and triggers Stripe checkout."""
+
+    company_name: str = Field(..., min_length=2, max_length=200)
+    contact_name: str = Field(..., min_length=2, max_length=200)
+    contact_email: EmailStr
+    plan: PlanName = Field(default="pro")
+    industry: Optional[str] = Field(default=None, max_length=100)
+    pain_points: List[str] = Field(default=[])
+    budget_range: Optional[str] = Field(default=None, max_length=100)
+    urgency: UrgencyLevel = Field(default="medium")
+    success_url: str = Field(default=_DEFAULT_SUCCESS_URL)
+    cancel_url: str = Field(default=_DEFAULT_CANCEL_URL)
+
+    @field_validator("pain_points")
+    @classmethod
+    def limit_pain_points(cls, v: List[str]) -> List[str]:
+        if len(v) > 20:
+            raise ValueError("List must not exceed 20 items.")
+        return v
+
+
+class CheckoutRequest(BaseModel):
+    """Create a Stripe checkout session for a subscription plan."""
+
+    plan: PlanName
+    customer_email: Optional[str] = None
+    success_url: str = Field(default=_DEFAULT_SUCCESS_URL)
+    cancel_url: str = Field(default=_DEFAULT_CANCEL_URL)
 
 
 class PricingTier(BaseModel):
@@ -112,10 +215,18 @@ class ProposalResponse(BaseModel):
     generated_at: str
 
 
+class LeadResponse(BaseModel):
+    proposal_id: str
+    checkout_url: Optional[str]
+    proposal: ProposalResponse
+    message: str
+
+
 class HealthResponse(BaseModel):
     status: str
     timestamp: str
     openai_configured: bool
+    stripe_configured: bool
     version: str
 
 
@@ -247,6 +358,46 @@ def generate_pricing_tiers(request: ProposalRequest) -> List[PricingTier]:
     ]
 
 
+def create_stripe_checkout_session(
+    plan: str,
+    customer_email: Optional[str],
+    success_url: str,
+    cancel_url: str,
+) -> Optional[str]:
+    """
+    Create a Stripe Checkout Session for a subscription plan.
+    Returns the checkout URL, or None if Stripe is not configured.
+    """
+    if not STRIPE_SECRET_KEY:
+        logger.warning("Stripe not configured; skipping checkout session creation.")
+        return None
+
+    plan_info = SUBSCRIPTION_PLANS.get(plan)
+    if not plan_info:
+        raise ValueError(f"Unknown plan: {plan}")
+
+    price_id = plan_info["price_id"]
+    if not price_id:
+        raise ValueError(
+            f"STRIPE_PRICE_{plan.upper()} env var is not set. "
+            "Create the price in your Stripe dashboard and set the env var."
+        )
+
+    session_params: Dict[str, Any] = {
+        "mode": "subscription",
+        "line_items": [{"price": price_id, "quantity": 1}],
+        "success_url": success_url,
+        "cancel_url": cancel_url,
+        "allow_promotion_codes": True,
+        "billing_address_collection": "auto",
+    }
+    if customer_email:
+        session_params["customer_email"] = customer_email
+
+    session = stripe.checkout.Session.create(**session_params)
+    return session.url
+
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
@@ -256,15 +407,26 @@ async def root() -> Dict[str, Any]:
         "service": "AI-Powered Deal Desk",
         "version": "1.0.0",
         "docs": "/docs",
+        "dashboard": "/dashboard",
         "revenue_target": "$18K/month",
         "win_rate": "42%",
         "generation_time": "60 seconds",
         "pricing": {
-            "solo": "$149/month",
-            "team": "$499/month",
-            "enterprise": "$1,499/month",
+            "basic": "$99/month",
+            "pro": "$299/month",
+            "enterprise": "$999/month",
         },
     }
+
+
+@app.get("/dashboard", response_class=HTMLResponse, summary="Revenue dashboard UI")
+async def dashboard() -> HTMLResponse:
+    """Serve the frontend revenue & proposal dashboard."""
+    dashboard_path = os.path.join(os.path.dirname(__file__), "static", "index.html")
+    if not os.path.isfile(dashboard_path):
+        raise HTTPException(status_code=404, detail="Dashboard not found.")
+    with open(dashboard_path, encoding="utf-8") as f:
+        return HTMLResponse(content=f.read())
 
 
 @app.get("/health", response_model=HealthResponse, summary="Health check")
@@ -273,7 +435,153 @@ async def health_check() -> HealthResponse:
         status="healthy",
         timestamp=datetime.now(timezone.utc).isoformat(),
         openai_configured=bool(os.getenv("OPENAI_API_KEY", "")),
+        stripe_configured=bool(STRIPE_SECRET_KEY),
         version="1.0.0",
+    )
+
+
+@app.get("/api/v1/plans", summary="Available subscription plans")
+async def get_plans() -> Dict[str, Any]:
+    """Return all available subscription plans with pricing."""
+    return {
+        key: {
+            "name": plan["name"],
+            "price_monthly": plan["price_monthly"],
+            "features": plan["features"],
+            "price_configured": bool(plan["price_id"]),
+        }
+        for key, plan in SUBSCRIPTION_PLANS.items()
+    }
+
+
+@app.post(
+    "/api/v1/checkout",
+    status_code=status.HTTP_201_CREATED,
+    summary="Create Stripe checkout session",
+)
+async def create_checkout(request: CheckoutRequest) -> Dict[str, Any]:
+    """
+    Create a Stripe Checkout Session for a subscription plan.
+    Returns a checkout URL that the user should be redirected to.
+    """
+    if not STRIPE_SECRET_KEY:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Stripe billing is not configured. Set STRIPE_SECRET_KEY.",
+        )
+
+    plan_info = SUBSCRIPTION_PLANS.get(request.plan)
+    if not plan_info:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unknown plan '{request.plan}'. Valid: basic, pro, enterprise.",
+        )
+
+    if not plan_info["price_id"]:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                f"STRIPE_PRICE_{request.plan.upper()} is not configured. "
+                "Create this price in your Stripe dashboard."
+            ),
+        )
+
+    try:
+        checkout_url = create_stripe_checkout_session(
+            plan=request.plan,
+            customer_email=request.customer_email,
+            success_url=request.success_url,
+            cancel_url=request.cancel_url,
+        )
+    except stripe.StripeError as exc:
+        logger.error(f"Stripe error creating checkout: {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Stripe API error. Please try again.",
+        ) from exc
+
+    return {
+        "checkout_url": checkout_url,
+        "plan": request.plan,
+        "plan_name": plan_info["name"],
+        "price_monthly": plan_info["price_monthly"],
+    }
+
+
+@app.post(
+    "/api/v1/leads",
+    response_model=LeadResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Lead capture: generate proposal + trigger Stripe checkout",
+)
+async def capture_lead(request: LeadRequest) -> LeadResponse:
+    """
+    Lead capture endpoint.
+
+    1. Generates a complete AI-powered sales proposal.
+    2. Creates a Stripe Checkout Session for the selected plan.
+    3. Returns the proposal and the checkout URL.
+    """
+    logger.info(
+        f"Lead captured: {request.contact_name} <{request.contact_email}> @ {request.company_name}"
+    )
+
+    # Build a ProposalRequest from the lead data
+    proposal_req = ProposalRequest(
+        company_name=request.company_name,
+        industry=request.industry,
+        pain_points=request.pain_points,
+        budget_range=request.budget_range,
+        urgency=request.urgency,
+    )
+
+    content = await generate_proposal_content(proposal_req)
+    pricing_tiers = generate_pricing_tiers(proposal_req)
+    now = datetime.now(timezone.utc)
+    proposal_id = f"PROP-{now.strftime('%Y%m%d-%H%M%S')}"
+
+    proposal = ProposalResponse(
+        proposal_id=proposal_id,
+        executive_summary=content.get("executive_summary", ""),
+        solution_overview=content.get("solution_overview", ""),
+        pricing_tiers=pricing_tiers,
+        roi_calculation=content.get("roi_calculation", {}),
+        next_steps=content.get("next_steps", ""),
+        pdf_url=f"/proposals/{proposal_id}.pdf",
+        generated_at=now.isoformat(),
+    )
+
+    # Attempt to create Stripe checkout session
+    checkout_url: Optional[str] = None
+    message = "Proposal generated successfully."
+
+    if STRIPE_SECRET_KEY:
+        plan_info = SUBSCRIPTION_PLANS.get(request.plan, {})
+        if plan_info.get("price_id"):
+            try:
+                checkout_url = create_stripe_checkout_session(
+                    plan=request.plan,
+                    customer_email=str(request.contact_email),
+                    success_url=request.success_url,
+                    cancel_url=request.cancel_url,
+                )
+                message = "Proposal generated. Proceed to checkout to activate your subscription."
+            except stripe.StripeError as exc:
+                logger.error(f"Stripe error for lead {request.contact_email}: {exc}")
+                message = "Proposal generated. Billing setup pending — contact support."
+        else:
+            message = (
+                "Proposal generated. Stripe price not configured for this plan — "
+                "contact sales to complete billing setup."
+            )
+    else:
+        message = "Proposal generated. Stripe not configured — billing will be set up manually."
+
+    return LeadResponse(
+        proposal_id=proposal_id,
+        checkout_url=checkout_url,
+        proposal=proposal,
+        message=message,
     )
 
 
@@ -304,6 +612,126 @@ async def create_proposal(request: ProposalRequest) -> ProposalResponse:
         pdf_url=f"/proposals/{proposal_id}.pdf",
         generated_at=now.isoformat(),
     )
+
+
+@app.post(
+    "/api/v1/stripe/webhook",
+    summary="Stripe webhook receiver",
+)
+async def stripe_webhook(request: Request) -> JSONResponse:
+    """
+    Receive and process Stripe webhook events.
+
+    Configure your Stripe webhook to send events to this endpoint.
+    Set STRIPE_WEBHOOK_SECRET to the signing secret from your Stripe dashboard.
+    """
+    payload = await request.body()
+    sig_header = request.headers.get("stripe-signature", "")
+
+    if not STRIPE_WEBHOOK_SECRET:
+        logger.warning("STRIPE_WEBHOOK_SECRET not set; skipping signature verification.")
+        try:
+            event = json.loads(payload)
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=400, detail="Invalid JSON payload.")
+    else:
+        try:
+            event = stripe.Webhook.construct_event(payload, sig_header, STRIPE_WEBHOOK_SECRET)
+        except stripe.error.SignatureVerificationError as exc:
+            logger.warning(f"Invalid Stripe webhook signature: {exc}")
+            raise HTTPException(status_code=400, detail="Invalid webhook signature.") from exc
+        except Exception as exc:
+            logger.error(f"Webhook processing error: {exc}")
+            raise HTTPException(status_code=400, detail="Webhook error.") from exc
+
+    event_type = event.get("type", "unknown") if isinstance(event, dict) else event["type"]
+    event_data = (event.get("data", {}).get("object", {})
+                  if isinstance(event, dict)
+                  else event.data.object.to_dict_recursive())
+
+    logger.info(f"Stripe webhook received: {event_type}")
+
+    if event_type == "checkout.session.completed":
+        customer_email = event_data.get("customer_email") or event_data.get("customer_details", {}).get("email")
+        logger.info(f"Checkout completed for: {customer_email}")
+
+    elif event_type == "customer.subscription.created":
+        logger.info(f"Subscription created: {event_data.get('id')} status={event_data.get('status')}")
+
+    elif event_type == "customer.subscription.updated":
+        logger.info(f"Subscription updated: {event_data.get('id')} status={event_data.get('status')}")
+
+    elif event_type == "customer.subscription.deleted":
+        logger.info(f"Subscription cancelled: {event_data.get('id')}")
+
+    elif event_type == "invoice.payment_succeeded":
+        logger.info(f"Payment succeeded: invoice={event_data.get('id')} amount={event_data.get('amount_paid')}")
+
+    elif event_type == "invoice.payment_failed":
+        logger.warning(f"Payment failed: invoice={event_data.get('id')} customer={event_data.get('customer')}")
+
+    return JSONResponse(content={"received": True, "type": event_type})
+
+
+@app.get("/api/v1/revenue", summary="Live revenue & subscription stats")
+async def get_revenue() -> Dict[str, Any]:
+    """
+    Returns live revenue and subscription data from Stripe.
+    Falls back to environment-variable overrides if Stripe is not configured.
+    """
+    if not STRIPE_SECRET_KEY:
+        return {
+            "stripe_configured": False,
+            "mrr": float(os.getenv("STAT_MRR", "0")),
+            "active_subscriptions": int(os.getenv("STAT_ACTIVE_SUBS", "0")),
+            "revenue_target": 18000,
+            "target_progress_pct": 0.0,
+            "plans": {
+                key: {"name": p["name"], "price_monthly": p["price_monthly"], "active": 0}
+                for key, p in SUBSCRIPTION_PLANS.items()
+            },
+        }
+
+    try:
+        subscriptions = stripe.Subscription.list(status="active", limit=100)
+
+        plan_counts: Dict[str, int] = {"basic": 0, "pro": 0, "enterprise": 0}
+        mrr = 0.0
+
+        for sub in subscriptions.data:
+            for item in sub.items.data:
+                price_id = item.price.id
+                unit_amount = item.price.unit_amount or 0
+                mrr += unit_amount / 100.0
+                for key, plan in SUBSCRIPTION_PLANS.items():
+                    if plan["price_id"] and price_id == plan["price_id"]:
+                        plan_counts[key] += 1
+
+        active_total = sum(plan_counts.values())
+        target = 18000.0
+        progress = round((mrr / target) * 100, 1) if target > 0 else 0.0
+
+        return {
+            "stripe_configured": True,
+            "mrr": round(mrr, 2),
+            "active_subscriptions": active_total,
+            "revenue_target": target,
+            "target_progress_pct": progress,
+            "plans": {
+                key: {
+                    "name": SUBSCRIPTION_PLANS[key]["name"],
+                    "price_monthly": SUBSCRIPTION_PLANS[key]["price_monthly"],
+                    "active": plan_counts[key],
+                }
+                for key in SUBSCRIPTION_PLANS
+            },
+        }
+    except stripe.StripeError as exc:
+        logger.error(f"Stripe error fetching revenue: {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Failed to fetch revenue data from Stripe.",
+        ) from exc
 
 
 @app.get("/api/v1/stats", summary="Platform statistics")
