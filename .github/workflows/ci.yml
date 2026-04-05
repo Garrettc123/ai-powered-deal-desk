@@ -5,6 +5,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 # Restrict default token permissions across all jobs
 permissions:
@@ -90,4 +91,9 @@ jobs:
       - name: Deploy to Railway
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-        run: railway up --service ai-deal-desk --detach
+        run: |
+          if [ -z "$RAILWAY_TOKEN" ]; then
+            echo "⚠️ RAILWAY_TOKEN not configured — skipping"
+            exit 0
+          fi
+          railway up --service ai-deal-desk --detach
